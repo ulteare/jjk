@@ -1,28 +1,21 @@
-
 """
-Step 6 (v2): Hollow Purple - two-phase gesture with orb charge + flick-fire animation
+Combined Gestures: Unlimited Void + Hollow Purple
 
-Visual style:
-- Deep/dark purple energy orb with a TRUE smooth radial gradient glow (dark -> bright
-  -> dark, per-pixel interpolated, not stepped circles) plus rotating swirl arcs
-- Sharp, long 8-pointed star core (glowing light) with a small center, slowly rotating
-- Particles gather from across the ENTIRE screen, converging into the orb while
-  charging, and scatter back outward during the flick
+Gesture 1 - UNLIMITED VOID (from step5):
+Hand action: Index and middle fingers crossed, ring + pinky curled
+Effect: Toggle background video with person segmentation
 
-Phase 1 (CHARGING): thumb, index, middle fingertips touching, ring + pinky curled,
-palm facing up. The orb appears at the touch point and grows over time, capping
-at a max size (READY state) if you hold the pose without flicking.
-
-Phase 2 (FLICK): index and middle fingers rapidly snap away from the thumb. This is
-detected as a velocity spike (fast separation), not just "fingers no longer touching"
--- a slow relaxed-hand release should NOT trigger it.
-
-On flick: the orb scales up rapidly and shifts purple -> white, ending in a full-screen
-white flash that holds briefly then fades, auto-resetting back to idle (ready to charge
-again immediately).
+Gesture 2 - HOLLOW PURPLE (from step6d):
+Hand action: Two-phase gesture
+  Phase 1 (CHARGING): Thumb, index, middle fingertips touching, ring + pinky curled, palm facing up
+  Phase 2 (FLICK): Index and middle fingers rapidly snap away from thumb
+Effect: Charging orb that grows, then explodes with flash on flick
 
 Requires:
     pip install mediapipe opencv-python numpy
+
+First run will auto-download the segmentation model (~16MB) to the script's folder.
+Put your video file (infinitevoid.mp4) in the same folder as this script.
 
 Press 'q' to quit.
 """
@@ -32,42 +25,62 @@ import numpy as np
 import math
 import random
 import time
+import os
+import urllib.request
+
+from mediapipe.tasks import python as mp_python
+from mediapipe.tasks.python import vision as mp_vision
 
 # ---- Config ----
-GESTURE_LABEL = "HOLLOW PURPLE"
+VIDEO_PATH = "infinitevoid.mp4"
+MODEL_PATH = "selfie_multiclass_256x256.tflite"
+MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/image_segmenter/"
+             "selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite")
 
-DEBOUNCE_FRAMES = 5          # frames the charging pose must hold before we start charging
+# --- Unlimited Void config ---
+UV_DEBOUNCE_FRAMES = 5
+UV_RELEASE_FRAMES = 5
+MASK_BLUR_KSIZE = 9
+VIDEO_SPEED = 3
 
-# --- Orb charge timing ---
-CHARGE_DURATION = 1.8        # seconds to go from 0 -> max radius while holding the pose
-ORB_MAX_RADIUS = 70          # pixels, final size while in READY state
-
-# --- Flick detection ---
-FLICK_VELOCITY_THRESHOLD = 0.035   # normalized-coords/frame; fingertip separation speed to count as a flick
-TOUCH_DISTANCE_THRESHOLD = 0.06    # normalized distance; how close index/middle/thumb must be to count as "touching"
-
-# --- Flick/flash animation timing ---
-FLICK_DELAY_DURATION = 0.7   # seconds to hold at max size after flick before flying
-FLICK_FLY_DURATION = 0.35    # seconds for the orb to rocket toward the viewer
-FLASH_HOLD_DURATION = 0.3    # seconds the full white screen holds
-FLASH_FADE_DURATION = 0.4    # seconds for the flash to fade back to normal
-
-# --- Particle system ---
+# --- Hollow Purple config ---
+HP_DEBOUNCE_FRAMES = 5
+CHARGE_DURATION = 1.8
+ORB_MAX_RADIUS = 70
+FLICK_VELOCITY_THRESHOLD = 0.035
+TOUCH_DISTANCE_THRESHOLD = 0.06
+FLICK_DELAY_DURATION = 0.7
+FLICK_FLY_DURATION = 0.35
+FLASH_HOLD_DURATION = 0.3
+FLASH_FADE_DURATION = 0.4
 PARTICLE_COUNT = 22
-
-# --- Star core shape ---
-STAR_INNER_RATIO = 0.075   # lower = sharper/thinner points
-STAR_SCALE = 0.8        # relative to orb radius; higher = longer points, larger overall star
+STAR_INNER_RATIO = 0.075
+STAR_SCALE = 0.8
 
 # --- Performance ---
 WEBCAM_WIDTH = 640
 WEBCAM_HEIGHT = 480
+SEGMENTATION_SIZE = 192
+SEGMENT_EVERY_N_FRAMES = 3
 
 # --- Finger indicator config ---
 FINGERTIP_IDS = [4, 8, 12, 16, 20]
 FINGERTIP_RADIUS = 12
 FINGERTIP_COLOR = (255, 255, 255)
 FINGERTIP_ALPHA = 0.5
+
+# ---- Download segmentation model if missing ----
+if not os.path.exists(MODEL_PATH):
+    print(f"Downloading segmentation model to {MODEL_PATH} ...")
+    try:
+        urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+        print("Download complete.")
+    except Exception as e:
+        raise RuntimeError(
+            f"Could not download the segmentation model automatically ({e}).\n"
+            f"Please download it manually from:\n{MODEL_URL}\n"
+            f"and place it at: {os.path.abspath(MODEL_PATH)}"
+        )
 
 # ---- MediaPipe Hands ----
 mp_hands = mp.solutions.hands
@@ -76,7 +89,7 @@ mp_styles = mp.solutions.drawing_styles
 
 hands = mp_hands.Hands(
     static_image_mode=False,
-    max_num_hands=1,   # Hollow Purple is single-handed; locking to 1 reduces ambiguity + cost
+    max_num_hands=2,  # Support both hands (one for each gesture)
     min_detection_confidence=0.7,
     min_tracking_confidence=0.5,
 )
@@ -89,6 +102,8 @@ RING_TIP, RING_PIP = 16, 14
 PINKY_TIP, PINKY_PIP = 20, 18
 
 
+# ---- Gesture detection functions ----
+
 def is_finger_curled(landmarks, tip_idx, pip_idx):
     return landmarks[tip_idx].y > landmarks[pip_idx].y
 
@@ -98,9 +113,34 @@ def fingertip_distance(landmarks, idx_a, idx_b):
     return ((a.x - b.x) ** 2 + (a.y - b.y) ** 2) ** 0.5
 
 
+# --- Unlimited Void detection ---
+
+def is_index_middle_crossed(landmarks):
+    index_tip_x = landmarks[INDEX_TIP].x
+    middle_tip_x = landmarks[MIDDLE_TIP].x
+    index_mcp_x = landmarks[INDEX_MCP].x
+    middle_mcp_x = landmarks[MIDDLE_MCP].x
+
+    base_order = index_mcp_x - middle_mcp_x
+    tip_order = index_tip_x - middle_tip_x
+    crossed = (base_order * tip_order) < 0
+
+    tip_distance = ((landmarks[INDEX_TIP].x - landmarks[MIDDLE_TIP].x) ** 2 +
+                     (landmarks[INDEX_TIP].y - landmarks[MIDDLE_TIP].y) ** 2) ** 0.5
+
+    return crossed and tip_distance < 0.08
+
+
+def is_unlimited_void(landmarks):
+    ring_curled = is_finger_curled(landmarks, RING_TIP, RING_PIP)
+    pinky_curled = is_finger_curled(landmarks, PINKY_TIP, PINKY_PIP)
+    fingers_crossed = is_index_middle_crossed(landmarks)
+    return ring_curled and pinky_curled and fingers_crossed
+
+
+# --- Hollow Purple detection ---
+
 def get_pinch_center(landmarks, frame_w, frame_h):
-    """Average position of thumb/index/middle tips, in pixel coords -- this is
-    where the orb will be drawn."""
     xs = [landmarks[i].x for i in (THUMB_TIP, INDEX_TIP, MIDDLE_TIP)]
     ys = [landmarks[i].y for i in (THUMB_TIP, INDEX_TIP, MIDDLE_TIP)]
     cx = int((sum(xs) / 3) * frame_w)
@@ -109,22 +149,12 @@ def get_pinch_center(landmarks, frame_w, frame_h):
 
 
 def is_palm_facing_up(landmarks):
-    """
-    Approximate orientation check using MediaPipe's relative z-depth.
-    z is negative-ish toward the camera (smaller z = closer to camera) in MediaPipe's
-    convention, relative to the wrist. When the palm faces the camera/up, the middle
-    knuckle (MIDDLE_MCP) tends to sit closer to the camera than the wrist.
-    NOTE: this is the least reliable check here -- MediaPipe Hands doesn't give true
-    3D orientation. If this misfires on your setup, this is the first thing to retune
-    or loosen/remove.
-    """
     wrist_z = landmarks[WRIST].z
     middle_mcp_z = landmarks[MIDDLE_MCP].z
-    return middle_mcp_z < wrist_z  # middle knuckle closer to camera than wrist
+    return middle_mcp_z < wrist_z
 
 
 def is_charging_pose(landmarks):
-    """Phase 1: thumb+index+middle touching, ring+pinky curled, palm up."""
     ring_curled = is_finger_curled(landmarks, RING_TIP, RING_PIP)
     pinky_curled = is_finger_curled(landmarks, PINKY_TIP, PINKY_PIP)
 
@@ -139,17 +169,126 @@ def is_charging_pose(landmarks):
 
 
 def pinch_spread(landmarks):
-    """Sum of pairwise distances between thumb/index/middle tips -- a single number
-    that grows as the pinch opens up. Used to detect flick velocity."""
     return (fingertip_distance(landmarks, THUMB_TIP, INDEX_TIP) +
             fingertip_distance(landmarks, THUMB_TIP, MIDDLE_TIP) +
             fingertip_distance(landmarks, INDEX_TIP, MIDDLE_TIP))
 
 
-# ---- Orb + flash animation ----
+# ---- MediaPipe Image Segmenter ----
+BaseOptions = mp_python.BaseOptions
+ImageSegmenter = mp_vision.ImageSegmenter
+ImageSegmenterOptions = mp_vision.ImageSegmenterOptions
+VisionRunningMode = mp_vision.RunningMode
 
-PURPLE_CORE = np.array([80, 0, 60])      # BGR darker deep purple
-PURPLE_GLOW = np.array([110, 10, 80])    # BGR darker glow purple
+segmenter_options = ImageSegmenterOptions(
+    base_options=BaseOptions(model_asset_path=MODEL_PATH),
+    running_mode=VisionRunningMode.VIDEO,
+    output_category_mask=False,
+    output_confidence_masks=True,
+)
+segmenter = ImageSegmenter.create_from_options(segmenter_options)
+BACKGROUND_CLASS_INDEX = 0
+
+
+def get_person_mask_small(frame_bgr, timestamp_ms):
+    small = cv2.resize(frame_bgr, (SEGMENTATION_SIZE, SEGMENTATION_SIZE))
+    rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+    result = segmenter.segment_for_video(mp_image, timestamp_ms)
+
+    bg_confidence = result.confidence_masks[BACKGROUND_CLASS_INDEX].numpy_view()
+    person_mask = 1.0 - bg_confidence
+    return person_mask
+
+
+# ---- Background video controller ----
+
+def resize_cover(frame, target_w, target_h):
+    src_h, src_w = frame.shape[:2]
+    scale = target_h / src_h
+    new_w = int(round(src_w * scale))
+    new_h = target_h
+
+    resized = cv2.resize(frame, (new_w, new_h))
+
+    if new_w >= target_w:
+        x_start = (new_w - target_w) // 2
+        return resized[:, x_start:x_start + target_w]
+    else:
+        pad_total = target_w - new_w
+        pad_left = pad_total // 2
+        pad_right = pad_total - pad_left
+        return cv2.copyMakeBorder(resized, 0, 0, pad_left, pad_right,
+                                   cv2.BORDER_CONSTANT, value=(0, 0, 0))
+
+
+class BackgroundVideo:
+    def __init__(self, path, speed=1.0):
+        self.cap = cv2.VideoCapture(path)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"Could not open video file: {path}")
+        self.state = "off"
+        self.last_frame = None
+        self.speed = speed
+        self._skip_accumulator = 0.0
+
+    def activate(self):
+        self.state = "playing"
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        self.last_frame = None
+        self._skip_accumulator = 0.0
+
+    def deactivate(self):
+        self.state = "off"
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        self.last_frame = None
+        self._skip_accumulator = 0.0
+
+    def _read_next_frame(self):
+        ret, frame = self.cap.read()
+        self._skip_accumulator += (self.speed - 1.0)
+        while self._skip_accumulator >= 1.0 and ret:
+            ret, frame = self.cap.read()
+            self._skip_accumulator -= 1.0
+        return ret, frame
+
+    def get_frame(self, target_size):
+        w, h = target_size
+        if self.state == "off":
+            return None
+
+        if self.state == "playing":
+            ret, frame = self._read_next_frame()
+            if not ret:
+                self.state = "frozen"
+                if self.last_frame is not None:
+                    return resize_cover(self.last_frame, w, h)
+                return None
+            self.last_frame = frame
+            return resize_cover(frame, w, h)
+
+        if self.state == "frozen":
+            if self.last_frame is not None:
+                return resize_cover(self.last_frame, w, h)
+            return None
+
+        return None
+
+
+def composite(webcam_frame, bg_frame, person_mask_small):
+    mask_resized = cv2.resize(person_mask_small, (webcam_frame.shape[1], webcam_frame.shape[0]))
+    mask_resized = cv2.GaussianBlur(mask_resized, (MASK_BLUR_KSIZE, MASK_BLUR_KSIZE), 0)
+    mask_3ch = np.stack([mask_resized] * 3, axis=-1)
+
+    composited = (webcam_frame.astype(np.float32) * mask_3ch +
+                  bg_frame.astype(np.float32) * (1 - mask_3ch))
+    return composited.astype(np.uint8)
+
+
+# ---- Hollow Purple orb + flash animation ----
+
+PURPLE_CORE = np.array([80, 0, 60])
+PURPLE_GLOW = np.array([110, 10, 80])
 WHITE = np.array([255, 255, 255])
 
 
@@ -158,23 +297,10 @@ def lerp_color(c1, c2, t):
 
 
 def lerp_color_np(c1, c2, t):
-    """Same as lerp_color but returns a float32 numpy array (for gradient math),
-    not an int tuple (which is what cv2 drawing functions need)."""
     return (c1.astype(np.float32) * (1 - t) + c2.astype(np.float32) * t)
 
 
 def make_radial_gradient_patch(shape, center, max_radius, color_stops):
-    """
-    Same idea as a full-frame radial gradient, but only computes the distance field
-    and gradient over a square bounding box around `center` (sized to max_radius),
-    not the entire frame. This is the expensive part of the orb glow, and the visible
-    effect only ever covers a small region of the frame, so cropping the computation
-    is a large performance win with no visual difference.
-
-    Returns (patch_gradient, patch_alpha, (x0, y0, x1, y1)) where the bounds are the
-    region of the original frame this patch corresponds to (already clamped to the
-    frame's edges).
-    """
     h, w = shape[:2]
     cx, cy = center
     r = int(math.ceil(max_radius))
@@ -205,56 +331,22 @@ def make_radial_gradient_patch(shape, center, max_radius, color_stops):
         seg_color = color0 * (1 - t) + color1 * t
         gradient[seg_mask] = seg_color[seg_mask]
 
-    alpha = (np.clip(1.0 - norm_dist, 0, 1) ** 0.8)[..., None]  # Less fade, more visible
+    alpha = (np.clip(1.0 - norm_dist, 0, 1) ** 0.8)[..., None]
     return gradient, alpha, (x0, y0, x1, y1)
 
 
-def make_radial_gradient(shape, center, max_radius, color_stops):
-    """
-    Builds an HxWx3 float32 image where each pixel's color is interpolated along
-    color_stops based on its normalized distance from center (0=center, 1=max_radius).
-    color_stops: list of (position 0-1, BGR np.array float32), sorted by position.
-    Returns (gradient_image, normalized_distance_map).
-    NOTE: kept for reference/prototyping; the live script uses make_radial_gradient_patch
-    instead for performance (full-frame computation is far more expensive than needed).
-    """
-    h, w = shape[:2]
-    cx, cy = center
-    yy, xx = np.mgrid[0:h, 0:w]
-    dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
-    norm_dist = np.clip(dist / max_radius, 0, 1)
-
-    gradient = np.zeros((h, w, 3), dtype=np.float32)
-    for i in range(len(color_stops) - 1):
-        pos0, color0 = color_stops[i]
-        pos1, color1 = color_stops[i + 1]
-        seg_mask = (norm_dist >= pos0) & (norm_dist <= pos1)
-        if pos1 > pos0:
-            t = (norm_dist - pos0) / (pos1 - pos0)
-        else:
-            t = np.zeros_like(norm_dist)
-        t = np.clip(t, 0, 1)[..., None]
-        seg_color = color0 * (1 - t) + color1 * t
-        gradient[seg_mask] = seg_color[seg_mask]
-
-    return gradient, norm_dist
-
-
-# Pre-generate star tip length variations (fixed pattern, doesn't affect other randomness)
-_STAR_LENGTH_MULTIPLIERS = [1.8, 2.3, 1.2, 2.5, 1.5, 2.0, 1.1, 1.9]  # 8 points
+_STAR_LENGTH_MULTIPLIERS = [1.8, 2.3, 1.2, 2.5, 1.5, 2.0, 1.1, 1.9]
 
 def draw_star(frame, center, outer_radius, inner_ratio=0.4, points=8, color=(255, 255, 255), rotation=0.0):
-    """Draws a filled N-pointed star (alternating outer/inner radius vertices) --
-    used for the sharp glowing core instead of a plain circle. Some tips are randomly longer."""
     cx, cy = center
-    angle_step = math.pi / points  # half-step since we alternate outer/inner each vertex
+    angle_step = math.pi / points
     vertices = []
 
     for i in range(points * 2):
-        if i % 2 == 0:  # outer point
+        if i % 2 == 0:
             point_index = i // 2
             r = outer_radius * _STAR_LENGTH_MULTIPLIERS[point_index]
-        else:  # inner point
+        else:
             r = outer_radius * inner_ratio
         angle = rotation + i * angle_step
         x = cx + r * math.cos(angle)
@@ -266,18 +358,16 @@ def draw_star(frame, center, outer_radius, inner_ratio=0.4, points=8, color=(255
 
 
 class Particle:
-    """A particle that gathers from anywhere on screen, drifting/accelerating toward
-    the orb center while charging. During the flick, particles scatter outward instead."""
     __slots__ = ("x", "y", "speed", "size", "life", "max_life")
 
     def __init__(self, center, screen_w, screen_h):
         cx, cy = center
         max_dist = math.hypot(screen_w, screen_h) / 2
-        dist = max_dist * (0.3 + 0.7 * random.random())  # spread across the whole screen
+        dist = max_dist * (0.3 + 0.7 * random.random())
         angle = random.uniform(0, 2 * math.pi)
         self.x = cx + dist * math.cos(angle)
         self.y = cy + dist * math.sin(angle)
-        self.speed = random.uniform(120, 260)  # pixels/sec
+        self.speed = random.uniform(120, 260)
         self.size = random.uniform(1.5, 3.5)
         self.max_life = random.uniform(1.2, 2.2)
         self.life = self.max_life
@@ -289,7 +379,7 @@ class Particle:
         if dist > 1:
             dirx, diry = dx / dist, dy / dist
             if not inward:
-                dirx, diry = -dirx, -diry  # flick: scatter away from center instead
+                dirx, diry = -dirx, -diry
             self.x += dirx * self.speed * dt
             self.y += diry * self.speed * dt
         self.life -= dt
@@ -308,30 +398,19 @@ class Particle:
 
 
 class HollowPurple:
-    """
-    States:
-      idle        - nothing happening, waiting for charging pose
-      charging    - orb growing at the pinch point, tracks hand position live
-      ready       - orb at max size, holding, still tracks hand position, waiting for flick
-      flick_delay - 1 second hold after flick detected, orb stays at max size
-      flicking    - orb rockets toward viewer (scale + color animate), no longer tracks hand
-      flash       - full white screen hold + fade, then auto-resets to idle
-    """
-
     def __init__(self):
         self.state = "idle"
         self.charge_start_time = 0.0
         self.flick_start_time = 0.0
-        self.orb_center = (0, 0)        # last known pinch point, frozen once flicking starts
+        self.orb_center = (0, 0)
         self.current_radius = 0.0
-        self.prev_spread = None         # previous frame's pinch_spread(), for velocity calc
+        self.prev_spread = None
         self.particles = []
         self.screen_w = WEBCAM_WIDTH
         self.screen_h = WEBCAM_HEIGHT
         self._last_update_time = time.time()
 
     def update_charging(self, landmarks, frame_w, frame_h):
-        """Call every frame while the charging pose is held."""
         now = time.time()
         self.screen_w, self.screen_h = frame_w, frame_h
         if self.state == "idle":
@@ -345,7 +424,6 @@ class HollowPurple:
         if self.state == "charging":
             elapsed = now - self.charge_start_time
             t = min(elapsed / CHARGE_DURATION, 1.0)
-            # Ease-out growth, same shaping as the Unlimited Void portal felt good
             self.current_radius = ORB_MAX_RADIUS * (1 - (1 - t) ** 3)
             if t >= 1.0:
                 self.state = "ready"
@@ -355,7 +433,6 @@ class HollowPurple:
             self.current_radius = ORB_MAX_RADIUS
 
     def check_flick(self, landmarks):
-        """Call every frame while in charging/ready state to detect the flick motion."""
         spread = pinch_spread(landmarks)
         is_flick = False
         if self.prev_spread is not None:
@@ -369,17 +446,20 @@ class HollowPurple:
             self.flick_start_time = time.time()
 
     def abandon_charge(self):
-        """Call when the charging pose breaks WITHOUT a flick (treated as abandoned)."""
         if self.state in ("charging", "ready"):
             self.state = "idle"
             self.current_radius = 0.0
         self.prev_spread = None
         self.particles = []
 
+    def reset_flick_tracking(self):
+        """Reset velocity tracking when pose is re-established"""
+        self.prev_spread = None
+
     def update_and_draw(self, frame):
         now = time.time()
         dt = max(now - self._last_update_time, 0.0)
-        dt = min(dt, 0.1)  # clamp to avoid a huge jump if a frame stalls
+        dt = min(dt, 0.1)
         self._last_update_time = now
 
         if self.state == "idle":
@@ -394,11 +474,9 @@ class HollowPurple:
         if self.state == "flick_delay":
             elapsed = now - self.flick_start_time
             if elapsed >= FLICK_DELAY_DURATION:
-                # Delay over, transition to flicking
                 self.state = "flicking"
-                self.flick_start_time = now  # Reset timer for the fly animation
+                self.flick_start_time = now
             else:
-                # Hold at max size during delay
                 self._update_particles(dt, inward=True)
                 anim_t = now - self.charge_start_time
                 return self._draw_orb(frame, self.orb_center, ORB_MAX_RADIUS,
@@ -407,13 +485,11 @@ class HollowPurple:
         if self.state == "flicking":
             elapsed = now - self.flick_start_time
             t = min(elapsed / FLICK_FLY_DURATION, 1.0)
-            # Ease-in: starts slow, accelerates -- sells the "rushing toward you" feel
             eased_t = t ** 2
 
-            # Radius grows from ORB_MAX_RADIUS to something far bigger than the screen
             max_dim = max(frame.shape[0], frame.shape[1])
             radius = ORB_MAX_RADIUS + eased_t * (max_dim * 1.5 - ORB_MAX_RADIUS)
-            purple_amount = max(1.0 - eased_t, 0.0)  # shifts purple -> white as it grows
+            purple_amount = max(1.0 - eased_t, 0.0)
 
             self._update_particles(dt, inward=False)
             anim_t = now - self.charge_start_time
@@ -421,7 +497,7 @@ class HollowPurple:
 
             if t >= 1.0:
                 self.state = "flash"
-                self.flick_start_time = now  # reuse as flash_start_time
+                self.flick_start_time = now
                 self.particles = []
             return frame
 
@@ -433,7 +509,6 @@ class HollowPurple:
                 fade_t = (elapsed - FLASH_HOLD_DURATION) / FLASH_FADE_DURATION
                 alpha = 1.0 - fade_t
             else:
-                # Done -- auto-reset back to idle, ready to charge again
                 self.state = "idle"
                 self.current_radius = 0.0
                 self.prev_spread = None
@@ -452,12 +527,6 @@ class HollowPurple:
                 self.particles[i] = Particle(self.orb_center, self.screen_w, self.screen_h)
 
     def _draw_orb(self, frame, center, radius, purple_amount, anim_t):
-        """
-        Draws a swirling energy orb: a smooth radial gradient glow (dark -> bright -> dark,
-        not stepped), rotating swirl arcs, and a sharp star core, plus orbiting particles.
-        purple_amount=1.0 -> fully purple, 0.0 -> fully white (used during the flick).
-        anim_t: seconds since this charge/flick began, drives swirl rotation + pulse.
-        """
         radius = max(int(radius), 1)
         cx, cy = center
 
@@ -465,17 +534,15 @@ class HollowPurple:
         bright_color = lerp_color_np(PURPLE_GLOW, WHITE, 1 - purple_amount)
         glow_color = tuple(int(c) for c in bright_color)
 
-        # --- Smooth radial gradient glow: dark -> bright -> dark, true interpolation ---
         pulse = 1.0 + 0.06 * math.sin(anim_t * 6.0)
         glow_radius = radius * 2.2 * pulse
-        # Even darker purple for the outer edge
-        very_dark_purple = np.array([50, 0, 40])  # BGR very dark purple for outline
+        very_dark_purple = np.array([50, 0, 40])
         outer_dark = lerp_color_np(very_dark_purple, WHITE, 1 - purple_amount)
         color_stops = [
             (0.0, dark_color),
             (0.35, bright_color),
-            (0.75, dark_color),      # transition zone starts
-            (1.0, outer_dark),       # smooth transition to very dark purple at edge
+            (0.75, dark_color),
+            (1.0, outer_dark),
         ]
         gradient, alpha, (x0, y0, x1, y1) = make_radial_gradient_patch(
             frame.shape, center, glow_radius, color_stops)
@@ -484,7 +551,6 @@ class HollowPurple:
             blended = region * (1 - alpha) + gradient * alpha
             frame[y0:y1, x0:x1] = blended.astype(np.uint8)
 
-        # --- Swirl arcs: 3 layers rotating at different speeds/directions ---
         swirl_layers = [
             (radius * 1.05, 1.0, 90, max(int(radius * 0.035), 1)),
             (radius * 0.85, -1.4, 70, max(int(radius * 0.025), 1)),
@@ -501,9 +567,8 @@ class HollowPurple:
                             lineType=cv2.LINE_AA)
         frame = cv2.addWeighted(overlay, 0.55, frame, 0.45, 0)
 
-        # --- Sharp, long 8-pointed star core (glowing light), slowly rotating ---
         star_outer = radius * STAR_SCALE
-        circle_color = lerp_color_np(bright_color, WHITE, 0.3)  # blend toward purple
+        circle_color = lerp_color_np(bright_color, WHITE, 0.3)
         overlay = frame.copy()
         cv2.circle(overlay, (cx, cy), int(star_outer * 1.3),
                    tuple(int(c) for c in circle_color), -1, lineType=cv2.LINE_AA)
@@ -511,7 +576,6 @@ class HollowPurple:
         frame = draw_star(frame, (cx, cy), star_outer, inner_ratio=STAR_INNER_RATIO, points=8,
                            color=tuple(int(c) for c in WHITE), rotation=anim_t * 0.6)
 
-        # --- Particles ---
         overlay = frame.copy()
         for p in self.particles:
             a = p.alpha()
@@ -526,8 +590,9 @@ class HollowPurple:
         return frame
 
 
+# ---- UI drawing functions ----
+
 def draw_finger_indicators(frame, hand_landmarks_list):
-    """Draws translucent white circles on each fingertip for all detected hands."""
     if not hand_landmarks_list:
         return frame
 
@@ -544,12 +609,11 @@ def draw_finger_indicators(frame, hand_landmarks_list):
 
 
 def draw_gesture_label(frame, text):
-    """Draws a small plain yellow label in the bottom-right corner."""
     h, w = frame.shape[:2]
     font = cv2.FONT_HERSHEY_SIMPLEX
     font_scale = 0.6
     thickness = 1
-    color = (0, 255, 255)  # yellow in BGR
+    color = (0, 255, 255)
 
     (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
     margin = 15
@@ -566,11 +630,25 @@ cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, WEBCAM_WIDTH)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, WEBCAM_HEIGHT)
 
-cv2.namedWindow("Hollow Purple", cv2.WND_PROP_FULLSCREEN)
-cv2.setWindowProperty("Hollow Purple", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+bg_video = BackgroundVideo(VIDEO_PATH, speed=VIDEO_SPEED)
 
+cv2.namedWindow("JJK Gestures", cv2.WND_PROP_FULLSCREEN)
+cv2.setWindowProperty("JJK Gestures", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+
+# Unlimited Void state
+uv_active = False
+uv_consecutive_detections = 0
+uv_consecutive_absences = 0
+uv_gesture_armed = True
+
+# Hollow Purple state
 hollow_purple = HollowPurple()
-pose_consecutive_frames = 0  # debounce counter for idle -> charging transition
+hp_pose_consecutive_frames = 0
+
+# Segmentation state
+frame_count = 0
+cached_mask = None
+start_time = time.time()
 
 # FPS counter state
 fps_display = 0.0
@@ -587,72 +665,124 @@ while cap.isOpened():
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = hands.process(rgb)
 
-    pose_this_frame = False
-    landmarks_this_frame = None
+    uv_gesture_this_frame = False
+    hp_pose_this_frame = False
+    hp_landmarks_this_frame = None
+    any_hand_landmarks = None
 
+    # Detect gestures
     if results.multi_hand_landmarks:
-        hand_landmarks = results.multi_hand_landmarks[0]  # single-hand gesture
-        landmarks_this_frame = hand_landmarks.landmark
-        if is_charging_pose(landmarks_this_frame):
-            pose_this_frame = True
+        for hand_landmarks in results.multi_hand_landmarks:
+            landmarks = hand_landmarks.landmark
 
-    # --- Drive the state machine ---
-    # idle -> charging requires DEBOUNCE_FRAMES consecutive detections, to avoid
-    # a single jittery frame kicking off a charge by accident.
-    # Once charging/ready, every frame's pose check feeds the flick-velocity detector,
-    # so we keep evaluating flick even on frames where the strict pose check might
-    # momentarily blip false due to landmark noise.
-    if hollow_purple.state == "idle":
-        if pose_this_frame:
-            pose_consecutive_frames += 1
+            # Store the first hand's landmarks for flick detection
+            if any_hand_landmarks is None:
+                any_hand_landmarks = landmarks
+
+            # Check for Unlimited Void gesture
+            if is_unlimited_void(landmarks):
+                uv_gesture_this_frame = True
+
+            # Check for Hollow Purple charging pose
+            if is_charging_pose(landmarks):
+                hp_pose_this_frame = True
+                hp_landmarks_this_frame = landmarks
+
+    # --- Unlimited Void debounced toggle logic ---
+    if uv_gesture_this_frame:
+        uv_consecutive_detections += 1
+        uv_consecutive_absences = 0
+    else:
+        uv_consecutive_absences += 1
+        uv_consecutive_detections = 0
+
+    if uv_consecutive_absences >= UV_RELEASE_FRAMES:
+        uv_gesture_armed = True
+
+    if uv_gesture_armed and uv_consecutive_detections >= UV_DEBOUNCE_FRAMES:
+        uv_active = not uv_active
+        uv_gesture_armed = False
+        if uv_active:
+            bg_video.activate()
         else:
-            pose_consecutive_frames = 0
+            bg_video.deactivate()
 
-        if pose_consecutive_frames >= DEBOUNCE_FRAMES:
-            hollow_purple.update_charging(landmarks_this_frame, w, h)
+    # --- Unlimited Void compositing ---
+    if uv_active:
+        bg_frame = bg_video.get_frame((w, h))
+        if bg_frame is not None:
+            if frame_count % SEGMENT_EVERY_N_FRAMES == 0 or cached_mask is None:
+                timestamp_ms = int((time.time() - start_time) * 1000)
+                cached_mask = get_person_mask_small(frame, timestamp_ms)
+            frame = composite(frame, bg_frame, cached_mask)
+
+    frame_count += 1
+
+    # --- Hollow Purple state machine ---
+    if hollow_purple.state == "idle":
+        if hp_pose_this_frame:
+            hp_pose_consecutive_frames += 1
+        else:
+            hp_pose_consecutive_frames = 0
+
+        if hp_pose_consecutive_frames >= HP_DEBOUNCE_FRAMES:
+            hollow_purple.update_charging(hp_landmarks_this_frame, w, h)
 
     elif hollow_purple.state in ("charging", "ready"):
-        pose_consecutive_frames = 0  # reset; only relevant for the idle entry point
-        if landmarks_this_frame is not None:
-            hollow_purple.check_flick(landmarks_this_frame)
-            if hollow_purple.state in ("charging", "ready"):  # check_flick may have changed it
-                if pose_this_frame:
-                    hollow_purple.update_charging(landmarks_this_frame, w, h)
-                else:
-                    hollow_purple.abandon_charge()
+        hp_pose_consecutive_frames = 0
+        if any_hand_landmarks is not None:
+            # Always check for flick if we have hand landmarks
+            hollow_purple.check_flick(any_hand_landmarks)
+            if hollow_purple.state in ("charging", "ready"):
+                # Only update position if still in charging pose
+                if hp_pose_this_frame and hp_landmarks_this_frame is not None:
+                    hollow_purple.update_charging(hp_landmarks_this_frame, w, h)
         else:
             # Hand left the frame entirely -> abandon
             hollow_purple.abandon_charge()
     else:
-        pose_consecutive_frames = 0
+        hp_pose_consecutive_frames = 0
 
-    # flicking/flash states animate on their own via update_and_draw(), no input needed
-
+    # Hollow Purple animation (works over any background)
     frame = hollow_purple.update_and_draw(frame)
 
     # --- Finger indicator dots ---
     frame = draw_finger_indicators(frame, results.multi_hand_landmarks)
 
-    # --- Gesture name label (while charging/ready/flicking/flash) ---
+    # --- Gesture labels ---
+    if uv_active:
+        frame = draw_gesture_label(frame, "INFINITE VOID")
     if hollow_purple.state != "idle":
-        frame = draw_gesture_label(frame, GESTURE_LABEL)
+        # Draw HP label slightly higher to avoid overlap
+        h_temp, w_temp = frame.shape[:2]
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.6
+        thickness = 1
+        color = (0, 255, 255)
+        text = "HOLLOW PURPLE"
+        (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+        margin = 15
+        x = w_temp - text_w - margin
+        y = h_temp - margin - 25  # Offset from bottom
+        cv2.putText(frame, text, (x, y), font, font_scale, color, thickness, cv2.LINE_AA)
 
     # --- FPS counter ---
     fps_frame_count += 1
     elapsed = time.time() - fps_timer_start
-    if elapsed >= 0.5:  # update twice a second
+    if elapsed >= 0.5:
         fps_display = fps_frame_count / elapsed
         fps_frame_count = 0
         fps_timer_start = time.time()
 
-    # Debug overlay (remove once happy)
-    status = f"state={hollow_purple.state} radius={hollow_purple.current_radius:.0f} FPS={fps_display:.1f}"
+    # Debug overlay
+    status = f"UV={uv_active} HP={hollow_purple.state} FPS={fps_display:.1f}"
     cv2.putText(frame, status, (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-    cv2.imshow("Hollow Purple", frame)
+    cv2.imshow("JJK Gestures", frame)
     key = cv2.waitKey(1) & 0xFF
     if key == ord('q'):
         break
 
 cap.release()
+bg_video.cap.release()
 cv2.destroyAllWindows()
