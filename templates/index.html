@@ -21,64 +21,44 @@
             position: relative;
             width: 100vw;
             height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
+            overflow: hidden;
         }
 
         #video-feed {
-            max-width: 100%;
-            max-height: 100%;
-            object-fit: contain;
+            width: 100%;
+            height: 100vh;
+            object-fit: cover;
+            display: block;
         }
 
         #subtitle {
-            position: fixed;
-            bottom: 50px;
+            position: absolute;
+            bottom: 40px;
             left: 50%;
             transform: translateX(-50%);
-            background: rgba(0, 0, 0, 0.8);
             color: #fff;
-            padding: 15px 40px;
-            border-radius: 8px;
-            font-size: 28px;
-            font-weight: bold;
+            padding: 8px 20px;
+            font-size: 18px;
+            font-weight: normal;
             text-align: center;
-            letter-spacing: 3px;
-            text-shadow: 0 0 10px rgba(255, 255, 0, 0.5);
+            letter-spacing: 1px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.8);
             opacity: 0;
             transition: opacity 0.3s ease-in-out;
             z-index: 1000;
             pointer-events: none;
-            min-width: 300px;
         }
 
         #subtitle.show {
             opacity: 1;
-        }
-
-        #subtitle.infinite-void {
-            color: #00ffff;
-            text-shadow:
-                0 0 10px rgba(0, 255, 255, 0.8),
-                0 0 20px rgba(0, 255, 255, 0.6),
-                0 0 30px rgba(0, 255, 255, 0.4);
-        }
-
-        #subtitle.hollow-purple {
-            color: #ff00ff;
-            text-shadow:
-                0 0 10px rgba(255, 0, 255, 0.8),
-                0 0 20px rgba(255, 0, 255, 0.6),
-                0 0 30px rgba(255, 0, 255, 0.4);
         }
     </style>
 </head>
 <body>
     <div id="video-container">
         <img id="video-feed" src="{{ url_for('video_feed') }}" alt="Video Feed">
+        <div id="subtitle"></div>
     </div>
-    <div id="subtitle"></div>
 
     <script>
         const subtitleElement = document.getElementById('subtitle');
@@ -96,13 +76,6 @@
                         if (newText) {
                             subtitleElement.textContent = newText;
                             subtitleElement.className = 'show';
-
-                            // Add specific styling based on gesture
-                            if (newText.includes('INFINITE VOID')) {
-                                subtitleElement.classList.add('infinite-void');
-                            } else if (newText.includes('HOLLOW PURPLE')) {
-                                subtitleElement.classList.add('hollow-purple');
-                            }
                         } else {
                             subtitleElement.className = '';
                         }

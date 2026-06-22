@@ -41,7 +41,7 @@ MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/image_segmenter/"
 UV_DEBOUNCE_FRAMES = 5
 UV_RELEASE_FRAMES = 5
 MASK_BLUR_KSIZE = 9
-VIDEO_SPEED = 3
+VIDEO_SPEED = 4
 
 # --- Hollow Purple config ---
 HP_DEBOUNCE_FRAMES = 5
@@ -751,7 +751,7 @@ while cap.isOpened():
 
     # --- Gesture labels ---
     if uv_active:
-        frame = draw_gesture_label(frame, "INFINITE VOID")
+        frame = draw_gesture_label(frame, "Domain expansion: Infinite Void")
     if hollow_purple.state != "idle":
         # Draw HP label slightly higher to avoid overlap
         h_temp, w_temp = frame.shape[:2]
@@ -759,7 +759,7 @@ while cap.isOpened():
         font_scale = 0.6
         thickness = 1
         color = (0, 255, 255)
-        text = "HOLLOW PURPLE"
+        text = "Hollow Purple"
         (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
         margin = 15
         x = w_temp - text_w - margin

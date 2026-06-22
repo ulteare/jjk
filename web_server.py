@@ -28,7 +28,7 @@ MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/image_segmenter/"
 # --- Unlimited Void config ---
 UV_DEBOUNCE_FRAMES = 5
 UV_RELEASE_FRAMES = 5
-MASK_BLUR_KSIZE = 9
+MASK_BLUR_KSIZE = 5  # Reduced from 9 for sharper edges (must be odd number)
 VIDEO_SPEED = 2.5
 
 # --- Hollow Purple config ---
@@ -41,21 +41,16 @@ FLICK_DELAY_DURATION = 0.7
 FLICK_FLY_DURATION = 0.35
 FLASH_HOLD_DURATION = 0.3
 FLASH_FADE_DURATION = 0.4
-PARTICLE_COUNT = 22
+PARTICLE_COUNT = 15  # Reduced from 22 for better performance
 STAR_INNER_RATIO = 0.075
 STAR_SCALE = 0.8
 
 # --- Performance ---
-WEBCAM_WIDTH = 640
-WEBCAM_HEIGHT = 480
-SEGMENTATION_SIZE = 192
-SEGMENT_EVERY_N_FRAMES = 3
-
-# --- Finger indicator config ---
-FINGERTIP_IDS = [4, 8, 12, 16, 20]
-FINGERTIP_RADIUS = 12
-FINGERTIP_COLOR = (255, 255, 255)
-FINGERTIP_ALPHA = 0.5
+WEBCAM_WIDTH = 320  # Lower resolution for better FPS
+WEBCAM_HEIGHT = 240  # Lower resolution for better FPS
+SEGMENTATION_SIZE = 192  # Higher for cleaner edges (minimal FPS impact at low webcam res)
+SEGMENT_EVERY_N_FRAMES = 7  # Skip more frames for better FPS
+JPEG_QUALITY = 75  # Lower quality = faster encoding
 
 # Global state for subtitles
 current_subtitle = {"text": "", "timestamp": 0}
@@ -480,11 +475,11 @@ class HollowPurple:
 
             max_dim = max(frame.shape[0], frame.shape[1])
             radius = ORB_MAX_RADIUS + eased_t * (max_dim * 1.5 - ORB_MAX_RADIUS)
-            purple_amount = max(1.0 - eased_t, 0.0)
+            purple_amount = 1.0  # Keep fully purple during shooting
 
             self._update_particles(dt, inward=False)
             anim_t = now - self.charge_start_time
-            frame = self._draw_orb(frame, self.orb_center, radius, purple_amount, anim_t)
+            frame = self._draw_orb(frame, self.orb_center, radius, purple_amount, anim_t, is_shooting=True)
 
             if t >= 1.0:
                 self.state = "flash"
@@ -517,7 +512,7 @@ class HollowPurple:
             if p.is_dead(self.orb_center, self.screen_w, self.screen_h):
                 self.particles[i] = Particle(self.orb_center, self.screen_w, self.screen_h)
 
-    def _draw_orb(self, frame, center, radius, purple_amount, anim_t):
+    def _draw_orb(self, frame, center, radius, purple_amount, anim_t, is_shooting=False):
         radius = max(int(radius), 1)
         cx, cy = center
 
@@ -558,14 +553,16 @@ class HollowPurple:
                             lineType=cv2.LINE_AA)
         frame = cv2.addWeighted(overlay, 0.55, frame, 0.45, 0)
 
-        star_outer = radius * STAR_SCALE
-        circle_color = lerp_color_np(bright_color, WHITE, 0.3)
-        overlay = frame.copy()
-        cv2.circle(overlay, (cx, cy), int(star_outer * 1.3),
-                   tuple(int(c) for c in circle_color), -1, lineType=cv2.LINE_AA)
-        frame = cv2.addWeighted(overlay, 0.2, frame, 0.8, 0)
-        frame = draw_star(frame, (cx, cy), star_outer, inner_ratio=STAR_INNER_RATIO, points=8,
-                           color=tuple(int(c) for c in WHITE), rotation=anim_t * 0.6)
+        # Only draw star when NOT shooting
+        if not is_shooting:
+            star_outer = radius * STAR_SCALE
+            circle_color = lerp_color_np(bright_color, WHITE, 0.3)
+            overlay = frame.copy()
+            cv2.circle(overlay, (cx, cy), int(star_outer * 1.3),
+                       tuple(int(c) for c in circle_color), -1, lineType=cv2.LINE_AA)
+            frame = cv2.addWeighted(overlay, 0.2, frame, 0.8, 0)
+            frame = draw_star(frame, (cx, cy), star_outer, inner_ratio=STAR_INNER_RATIO, points=8,
+                               color=tuple(int(c) for c in WHITE), rotation=anim_t * 0.6)
 
         overlay = frame.copy()
         for p in self.particles:
@@ -582,22 +579,6 @@ class HollowPurple:
 
 
 # ---- UI drawing functions ----
-
-def draw_finger_indicators(frame, hand_landmarks_list):
-    if not hand_landmarks_list:
-        return frame
-
-    h, w = frame.shape[:2]
-    overlay = frame.copy()
-
-    for hand_landmarks in hand_landmarks_list:
-        for idx in FINGERTIP_IDS:
-            lm = hand_landmarks.landmark[idx]
-            cx, cy = int(lm.x * w), int(lm.y * h)
-            cv2.circle(overlay, (cx, cy), FINGERTIP_RADIUS, FINGERTIP_COLOR, -1, lineType=cv2.LINE_AA)
-
-    return cv2.addWeighted(overlay, FINGERTIP_ALPHA, frame, 1 - FINGERTIP_ALPHA, 0)
-
 
 def set_subtitle(text):
     """Set the current subtitle text"""
@@ -682,7 +663,7 @@ def generate_frames():
             uv_gesture_armed = False
             if uv_active:
                 bg_video.activate()
-                set_subtitle("INFINITE VOID")
+                set_subtitle("Domain expansion: Infinite Void")
             else:
                 bg_video.deactivate()
                 set_subtitle("")
@@ -710,7 +691,7 @@ def generate_frames():
             if hp_pose_consecutive_frames >= HP_DEBOUNCE_FRAMES:
                 hollow_purple.update_charging(hp_landmarks_this_frame, w, h)
                 if hp_was_idle and hollow_purple.state != "idle":
-                    set_subtitle("HOLLOW PURPLE")
+                    set_subtitle("Hollow Purple")
 
         elif hollow_purple.state in ("charging", "ready"):
             hp_pose_consecutive_frames = 0
@@ -735,11 +716,8 @@ def generate_frames():
         if not hp_was_idle and hollow_purple.state == "idle":
             set_subtitle("")
 
-        # --- Finger indicator dots ---
-        frame = draw_finger_indicators(frame, results.multi_hand_landmarks)
-
-        # Encode frame
-        ret, buffer = cv2.imencode('.jpg', frame)
+        # Encode frame with lower quality for faster streaming
+        ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
         frame = buffer.tobytes()
 
         yield (b'--frame\r\n'
@@ -760,13 +738,14 @@ def video_feed():
 @app.route('/subtitle')
 def subtitle():
     with subtitle_lock:
-        # Check if subtitle should still be displayed (2 second duration)
-        if current_subtitle["text"] and (time.time() - current_subtitle["timestamp"]) > 2.0:
+        # SUBTITLE DURATION: Change the value below (currently 2.0 seconds)
+        SUBTITLE_DURATION = 4.0
+        if current_subtitle["text"] and (time.time() - current_subtitle["timestamp"]) > SUBTITLE_DURATION:
             return jsonify({"text": ""})
         return jsonify(current_subtitle)
 
 
 if __name__ == '__main__':
     print("Starting JJK Gestures web server...")
-    print("Open http://localhost:5000 in your browser")
-    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+    print("Open http://localhost:5001 in your browser")
+    app.run(host='0.0.0.0', port=5001, debug=False, threaded=True)
