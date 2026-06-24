@@ -41,7 +41,7 @@ MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/image_segmenter/"
 UV_DEBOUNCE_FRAMES = 5
 UV_RELEASE_FRAMES = 5
 MASK_BLUR_KSIZE = 9
-VIDEO_SPEED = 4
+VIDEO_SPEED = 5
 
 # --- Hollow Purple config ---
 HP_DEBOUNCE_FRAMES = 5

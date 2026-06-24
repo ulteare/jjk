@@ -41,16 +41,16 @@ FLICK_DELAY_DURATION = 0.7
 FLICK_FLY_DURATION = 0.35
 FLASH_HOLD_DURATION = 0.3
 FLASH_FADE_DURATION = 0.4
-PARTICLE_COUNT = 15  # Reduced from 22 for better performance
+PARTICLE_COUNT = 10  # Reduced for better performance
 STAR_INNER_RATIO = 0.075
 STAR_SCALE = 0.8
 
 # --- Performance ---
 WEBCAM_WIDTH = 320  # Lower resolution for better FPS
 WEBCAM_HEIGHT = 240  # Lower resolution for better FPS
-SEGMENTATION_SIZE = 192  # Higher for cleaner edges (minimal FPS impact at low webcam res)
-SEGMENT_EVERY_N_FRAMES = 7  # Skip more frames for better FPS
-JPEG_QUALITY = 75  # Lower quality = faster encoding
+SEGMENTATION_SIZE = 96  # Further reduced to minimize CPU/heat
+SEGMENT_EVERY_N_FRAMES = 12  # Skip more frames to reduce heat
+JPEG_QUALITY = 65  # Lower quality = less CPU heat
 
 # Global state for subtitles
 current_subtitle = {"text": "", "timestamp": 0}
@@ -76,9 +76,10 @@ mp_styles = mp.solutions.drawing_styles
 
 hands = mp_hands.Hands(
     static_image_mode=False,
-    max_num_hands=2,
-    min_detection_confidence=0.7,
-    min_tracking_confidence=0.5,
+    max_num_hands=1,  # Reduced from 2 for faster processing
+    min_detection_confidence=0.5,  # Lower for faster detection
+    min_tracking_confidence=0.3,  # Lower for faster tracking
+    model_complexity=0,  # Use simpler model (0=lite, 1=full)
 )
 
 WRIST = 0
@@ -119,10 +120,22 @@ def is_index_middle_crossed(landmarks):
 
 
 def is_unlimited_void(landmarks):
+    """Detect Unlimited Void gesture - make it distinct from Hollow Purple"""
     ring_curled = is_finger_curled(landmarks, RING_TIP, RING_PIP)
     pinky_curled = is_finger_curled(landmarks, PINKY_TIP, PINKY_PIP)
     fingers_crossed = is_index_middle_crossed(landmarks)
-    return ring_curled and pinky_curled and fingers_crossed
+
+    # Make sure thumb is NOT touching index/middle (to avoid Hollow Purple confusion)
+    thumb_index_dist = fingertip_distance(landmarks, THUMB_TIP, INDEX_TIP)
+    thumb_middle_dist = fingertip_distance(landmarks, THUMB_TIP, MIDDLE_TIP)
+    thumb_not_touching = thumb_index_dist > 0.1 and thumb_middle_dist > 0.1
+
+    # Index and middle should be extended (not curled like in Hollow Purple pinch)
+    index_extended = landmarks[INDEX_TIP].y < landmarks[INDEX_PIP].y
+    middle_extended = landmarks[MIDDLE_TIP].y < landmarks[MIDDLE_PIP].y
+
+    return (ring_curled and pinky_curled and fingers_crossed and
+            thumb_not_touching and index_extended and middle_extended)
 
 
 # --- Hollow Purple detection ---
